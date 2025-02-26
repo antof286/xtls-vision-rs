@@ -1,0 +1,16 @@
+[package]
+name = "xtls-vision-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.43", features = ["net", "io-util", "macros", "sync"], default-features = false }
+aes-gcm = { version = "0.10" }
+rsa = { version = "0.9", features = ["serde"] }
+byteorder = "1.5"
+rand = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1.43", features = ["net", "io-util", "macros", "sync", "rt"], default-features = false }
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
