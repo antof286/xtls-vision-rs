@@ -506,18 +506,18 @@ impl XTlsInnerStream {
 ///  async {
 ///     let l = TcpListener::bind("0.0.0.0:443").await.unwrap();
 ///     let c = l.accept().await.unwrap().0;
-///     // Here you probably want to mimicry a TLS handshake using `c`
+///     // Here you probably want to mimic a TLS handshake using `c`
 ///     let mut stream = XTlsVisionStream::negotiate_as_server(
 ///         c,
 ///         // Your rsa_private_key here
 ///     ).await.unwrap();
-///     // Here you can exchange data with client before the proxification process
+///     // Here you can exchange data with the client before the proxification process
 ///     // (e.g. client can send TCP endpoint address to connect)
-///     // You should do it before ending early data because otherwise XTlsStream would likely
-///     // to detect your connection as "not TLS".
+///     // You should do it before ending the early data because otherwise XTlsStream would likely
+///     // detect your connection as "not TLS".
 ///     // Early data is encrypted
 ///     stream.end_early_data();
-///     // You can start [`tokio::io::copy`] here between `stream` and `remote_stream`
+///     // Here you can start [`tokio::io::copy`] between `stream` and `remote_stream`
 /// }
 /// ```
 ///
@@ -530,13 +530,13 @@ impl XTlsInnerStream {
 ///         TcpStream::connect("0.0.0.0:1234").await.unwrap(),
 ///         // Your rsa_public_key here
 ///     ).await.unwrap();
-///     // Here you can exchange data with server before the proxification process
+///     // Here you can exchange data with the server before the proxification process
 ///     // (e.g. you can send TCP endpoint address to connect)
-///     // You should do it before ending early data because otherwise XTlsStream would likely
-///     // to detect your connection as "not TLS".
+///     // You should do it before ending the early data because otherwise XTlsStream would likely
+///     // detect your connection as "not TLS".
 ///     // Early data is encrypted
 ///     stream.end_early_data();
-///     // You can start [`tokio::io::copy`] here between `stream` and `local_stream`
+///     // Here you can start [`tokio::io::copy`] between `stream` and `local_stream`
 /// }
 /// ```
 pub struct XTlsVisionStream {
@@ -578,7 +578,7 @@ impl XTlsVisionStream {
         Ok(len)
     }
 
-    /// Negotiates AES256-GCM session key with a server. Session key is encrypted with
+    /// Negotiates AES256-GCM session key with the server. Session key is encrypted with
     /// `rsa_public_key`
     pub async fn negotiate_as_client(
         mut stream: TcpStream,
@@ -589,8 +589,7 @@ impl XTlsVisionStream {
         let mut rng = rsa::rand_core::OsRng;
         let mut aes_key = [0u8; 32];
         rng.fill_bytes(&mut aes_key);
-        // The only error `encrypt` returns is "Message too long"
-        // Obviously it is not
+        // The only error `encrypt` returns is "Message too long" (it obviously isn't)
         let encrypted_key = rsa_public_key.encrypt(
             &mut rng,
             Pkcs1v15Encrypt,
@@ -623,7 +622,7 @@ impl XTlsVisionStream {
         })
     }
 
-    /// Negotiates AES256-GCM session key with a client. Decrypts session key with `rsa_private_key`
+    /// Negotiates AES256-GCM session key with the client. Decrypts session key with `rsa_private_key`
     pub async fn negotiate_as_server(
         mut stream: TcpStream,
         rsa_private_key: RsaPrivateKey
@@ -668,12 +667,12 @@ impl XTlsVisionStream {
     }
 
     /// This method should be called after negotiation. You can send and receive some data
-    /// before calling it. Data you sent will not be analyzed for being TLS/Non TLS
+    /// before calling it. Data you sent will not be analyzed for being TLS/Not TLS
     pub fn end_early_data(&mut self) {
         self.early_data = false
     }
 
-    /// Call this method if you don't want to analyze inner data for being TLS/Non TLS and want
+    /// Call this method if you don't want to analyze inner data for being TLS/Not TLS and want
     /// to enforce encryption
     pub fn stop_tls_detection(&mut self) {
         self.analyzer.force_done();
