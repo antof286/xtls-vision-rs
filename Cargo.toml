@@ -8,6 +8,7 @@ tokio = { version = "1.43", features = ["net", "io-util", "macros", "sync"], def
 aes-gcm = { version = "0.10" }
 rsa = { version = "0.9", features = ["serde"] }
 byteorder = "1.5"
+# Use older version to be compatible with rsa crate
 rand = "0.8"
 
 [dev-dependencies]

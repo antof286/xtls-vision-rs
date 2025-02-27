@@ -28,7 +28,7 @@ struct AesTlsTcpStream {
 }
 
 impl AesTlsTcpStream {
-    pub(crate) fn new(aes: Aes256Gcm, stream: TcpStream) -> Self {
+    pub fn new(aes: Aes256Gcm, stream: TcpStream) -> Self {
         Self {
             aes,
             receive_buffer: Box::new([0u8; 0x5000]),
@@ -74,7 +74,7 @@ impl AesTlsTcpStream {
         Ok(())
     }
 
-    pub(crate) fn try_write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    pub fn try_write(&mut self, buf: &[u8]) -> io::Result<usize> {
         const MAX_TLS_RECORD_SIZE: usize = 0x4000;
 
         if buf.len() == 0 {
@@ -131,7 +131,7 @@ impl AesTlsTcpStream {
         Ok(buf.len())
     }
 
-    pub(crate) fn try_read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    pub fn try_read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if !self.receive_buffer_encrypted {
             let receive_buffer =
                 &self.receive_buffer[self.receive_buffer_position..self.receive_buffer_size];
@@ -186,11 +186,11 @@ impl AesTlsTcpStream {
         Err(io::ErrorKind::WouldBlock.into())
     }
 
-    pub(crate) async fn writable(&self) -> io::Result<()> {
+    pub async fn writable(&self) -> io::Result<()> {
         self.stream.writable().await
     }
 
-    pub(crate) async fn readable(&self) -> io::Result<()> {
+    pub async fn readable(&self) -> io::Result<()> {
         if !self.receive_buffer_encrypted {
             assert!(self.receive_buffer.len() > 5 + 12);
             return Ok(())
@@ -198,18 +198,18 @@ impl AesTlsTcpStream {
         self.stream.readable().await
     }
 
-    pub(crate) fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    pub fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.stream.poll_write_ready(cx)
     }
 
-    pub(crate) fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    pub fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if !self.receive_buffer_encrypted {
             return Poll::Ready(Ok(()))
         }
         self.stream.poll_read_ready(cx)
     }
 
-    pub(crate) fn into_inner(self) -> TcpStream {
+    pub fn into_inner(self) -> TcpStream {
         assert_eq!(self.send_buffer_size, 0);
         assert_eq!(self.receive_buffer_size, 0);
 
@@ -456,14 +456,14 @@ struct XTlsInnerStream {
 }
 
 impl XTlsInnerStream {
-    pub(crate) fn new(aes: Aes256Gcm, inner: TcpStream) -> Self {
+    pub fn new(aes: Aes256Gcm, inner: TcpStream) -> Self {
         Self {
             aes_stream: Some(AesTlsTcpStream::new(aes, inner)),
             tcp_stream: None
         }
     }
 
-    pub(crate) fn get_mut(&mut self) -> Result<&mut AesTlsTcpStream, &mut TcpStream> {
+    pub fn get_mut(&mut self) -> Result<&mut AesTlsTcpStream, &mut TcpStream> {
         if let Some(aes_stream) = self.aes_stream.as_mut() {
             return Ok(aes_stream);
         }
@@ -473,7 +473,7 @@ impl XTlsInnerStream {
         panic!("Invalid state of XTlsInnerStream");
     }
 
-    pub(crate) fn get(&self) -> Result<&AesTlsTcpStream, &TcpStream> {
+    pub fn get(&self) -> Result<&AesTlsTcpStream, &TcpStream> {
         if let Some(aes_stream) = self.aes_stream.as_ref() {
             return Ok(aes_stream);
         }
@@ -483,16 +483,62 @@ impl XTlsInnerStream {
         panic!("Invalid state of XTlsInnerStream");
     }
 
-    pub(crate) fn get_aes_stream(&mut self) -> Option<&mut AesTlsTcpStream> {
+    pub fn get_aes_stream(&mut self) -> Option<&mut AesTlsTcpStream> {
         self.aes_stream.as_mut()
     }
 
-    pub(crate) fn convert_to_tcp(&mut self) {
+    pub fn convert_to_tcp(&mut self) {
         let aes = self.aes_stream.take().unwrap();
         self.tcp_stream = Some(aes.into_inner());
     }
 }
 
+#[cfg(not(doctest))]
+/// Stream which encrypts inner data until it detects TLS traffic inside
+///
+/// It does implement [`AsyncRead`] + [`AsyncWrite`] so you can use all of their methods.
+/// Use [`tokio::io::split`] to read and write simultaneously
+///
+/// Example usage as server:
+/// ```
+/// use tokio::net::TcpListener;
+/// use xtls_vision_rs::XTlsVisionStream;
+///  async {
+///     let l = TcpListener::bind("0.0.0.0:443").await.unwrap();
+///     let c = l.accept().await.unwrap().0;
+///     // Here you probably want to mimicry a TLS handshake using `c`
+///     let mut stream = XTlsVisionStream::negotiate_as_server(
+///         c,
+///         // Your rsa_private_key here
+///     ).await.unwrap();
+///     // Here you can exchange data with client before the proxification process
+///     // (e.g. client can send TCP endpoint address to connect)
+///     // You should do it before ending early data because otherwise XTlsStream would likely
+///     // to detect your connection as "not TLS".
+///     // Early data is encrypted
+///     stream.end_early_data();
+///     // You can start [`tokio::io::copy`] here between `stream` and `remote_stream`
+/// }
+/// ```
+///
+/// Example usage as client:
+/// ```
+/// use tokio::net::TcpStream;
+/// use xtls_vision_rs::XTlsVisionStream;
+///  async {
+///     let mut stream = XTlsVisionStream::negotiate_as_client(
+///         TcpStream::connect("127.0.0.1:12347").await.unwrap(),
+///         // Your rsa_public_key here
+///     ).await.unwrap();
+///     // Here you can exchange data with server before the proxification process
+///     // (e.g. you can send TCP endpoint address to connect)
+///     // You should do it before ending early data because otherwise XTlsStream would likely
+///     // to detect your connection as "not TLS".
+///     // Early data is encrypted
+///     stream.end_early_data();
+///     // You can start [`tokio::io::copy`] here between `stream` and `local_stream`
+/// }
+/// ```
 pub struct XTlsVisionStream {
     inner: XTlsInnerStream,
     analyzer: TlsAnalyzer,
@@ -532,6 +578,8 @@ impl XTlsVisionStream {
         Ok(len)
     }
 
+    /// Negotiates AES256-GCM session key with a server. Session key is encrypted with
+    /// `rsa_public_key`
     pub async fn negotiate_as_client(
         mut stream: TcpStream,
         rsa_public_key: RsaPublicKey
@@ -575,6 +623,7 @@ impl XTlsVisionStream {
         })
     }
 
+    /// Negotiates AES256-GCM session key with a client. Decrypts session key with `rsa_private_key`
     pub async fn negotiate_as_server(
         mut stream: TcpStream,
         rsa_private_key: RsaPrivateKey
@@ -618,14 +667,19 @@ impl XTlsVisionStream {
         })
     }
 
+    /// This method should be called after negotiation. You can send and receive some data
+    /// before calling it. Data you sent will not be analyzed for being TLS/Non TLS
     pub fn end_early_data(&mut self) {
         self.early_data = false
     }
 
+    /// Call this method if you don't want to analyze inner data for being TLS/Non TLS and want
+    /// to enforce encryption
     pub fn stop_tls_detection(&mut self) {
         self.analyzer.force_done();
     }
 
+    /// See [`TcpStream::try_read`]
     pub fn try_read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.early_data {
             return self.inner.get_aes_stream().unwrap().try_read(buf);
@@ -659,6 +713,7 @@ impl XTlsVisionStream {
         }
     }
 
+    /// See [`TcpStream::try_read`]
     pub fn try_write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if self.send_buffer_size != 0 {
             let n = self.inner
@@ -763,6 +818,7 @@ impl XTlsVisionStream {
         }
     }
 
+    /// See [`TcpStream::writable`]
     pub async fn writable(&self) -> io::Result<()> {
         match self.inner.get() {
             Ok(s) => s.writable().await,
@@ -770,6 +826,7 @@ impl XTlsVisionStream {
         }
     }
 
+    /// See [`TcpStream::readable`]
     pub async fn readable(&self) -> io::Result<()> {
         match self.inner.get() {
             Ok(s) => s.readable().await,
@@ -777,14 +834,16 @@ impl XTlsVisionStream {
         }
     }
 
-    pub(crate) fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    /// See [`TcpStream::poll_write_ready`]
+    pub fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.inner.get() {
             Ok(s) => s.poll_write_ready(cx),
             Err(s) => s.poll_write_ready(cx),
         }
     }
 
-    pub(crate) fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    /// See [`TcpStream::poll_read_ready`]
+    pub fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.inner.get() {
             Ok(s) => s.poll_read_ready(cx),
             Err(s) => s.poll_read_ready(cx),
