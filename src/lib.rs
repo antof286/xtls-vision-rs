@@ -527,7 +527,7 @@ impl XTlsInnerStream {
 /// use xtls_vision_rs::XTlsVisionStream;
 ///  async {
 ///     let mut stream = XTlsVisionStream::negotiate_as_client(
-///         TcpStream::connect("127.0.0.1:12347").await.unwrap(),
+///         TcpStream::connect("0.0.0.0:1234").await.unwrap(),
 ///         // Your rsa_public_key here
 ///     ).await.unwrap();
 ///     // Here you can exchange data with server before the proxification process
