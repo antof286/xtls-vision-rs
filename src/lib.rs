@@ -15,15 +15,80 @@ pub mod rsa {
     pub use rsa::*;
 }
 
+struct Buffer<const S: usize> {
+    buffer: Box<[u8; S]>,
+    buffer_fill_position: usize,
+    buffer_consume_position: usize
+}
+
+impl<const S: usize> Buffer<S> {
+    pub(crate) fn new() -> Self {
+        assert_ne!(S, 0);
+        Self {
+            buffer: Box::new([0u8; S]),
+            buffer_fill_position: 0,
+            buffer_consume_position: 0
+        }
+    }
+
+    pub(crate) fn consumed(&self) -> bool {
+        assert!(self.buffer_consume_position <= self.buffer_fill_position);
+        self.buffer_fill_position == 0
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.buffer_fill_position = 0;
+        self.buffer_consume_position = 0;
+    }
+
+    pub(crate) fn fill<F: FnMut(&mut [u8]) -> usize>(&mut self, mut filler: F) {
+        let n = filler(&mut self.buffer[self.buffer_fill_position..]);
+        assert!(n <= (&self.buffer[self.buffer_fill_position..]).len());
+        self.buffer_fill_position += n;
+    }
+
+    pub(crate) fn io_fill<F: FnMut(&mut [u8]) -> io::Result<usize>>(&mut self, mut filler: F) -> io::Result<()> {
+        let n = filler(&mut self.buffer[self.buffer_fill_position..])?;
+        assert!(n <= (&self.buffer[self.buffer_fill_position..]).len());
+        self.buffer_fill_position += n;
+        Ok(())
+    }
+
+    pub(crate) fn consume<F: FnMut(&[u8]) -> usize>(&mut self, mut consumer: F) {
+        let n = consumer(&self.buffer[self.buffer_consume_position..self.buffer_fill_position]);
+        assert!(n <= (&self.buffer[self.buffer_consume_position..self.buffer_fill_position]).len());
+        self.buffer_consume_position += n;
+        if self.buffer_consume_position == self.buffer_fill_position {
+            self.buffer_consume_position = 0;
+            self.buffer_fill_position = 0;
+        }
+    }
+
+    pub(crate) fn io_consume<F: FnMut(&[u8]) -> io::Result<usize>>(&mut self, mut consumer: F) -> io::Result<()> {
+        let n = consumer(&self.buffer[self.buffer_consume_position..self.buffer_fill_position])?;
+        assert!(n <= (&self.buffer[self.buffer_consume_position..self.buffer_fill_position]).len());
+        self.buffer_consume_position += n;
+        if self.buffer_consume_position == self.buffer_fill_position {
+            self.buffer_consume_position = 0;
+            self.buffer_fill_position = 0;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn get_filled(&self) -> &[u8] {
+        &self.buffer[0..self.buffer_fill_position]
+    }
+
+    pub(crate) fn get_filled_mut(&mut self) -> &mut [u8] {
+        &mut self.buffer[0..self.buffer_fill_position]
+    }
+}
+
 struct AesTlsTcpStream {
     aes: Aes256Gcm,
-    receive_buffer: Box<[u8; 0x5000]>,
-    receive_buffer_position: usize,
-    receive_buffer_size: usize,
+    receive_buffer: Buffer<0x4005>,
     receive_buffer_encrypted: bool,
-    send_buffer: Box<[u8; 0x5000]>,
-    send_buffer_position: usize,
-    send_buffer_size: usize,
+    send_buffer: Buffer<0x4005>,
     stream: TcpStream
 }
 
@@ -31,45 +96,49 @@ impl AesTlsTcpStream {
     pub fn new(aes: Aes256Gcm, stream: TcpStream) -> Self {
         Self {
             aes,
-            receive_buffer: Box::new([0u8; 0x5000]),
-            receive_buffer_position: 0,
-            receive_buffer_size: 0,
+            receive_buffer: Buffer::new(),
             receive_buffer_encrypted: true,
-            send_buffer: Box::new([0u8; 0x5000]),
-            send_buffer_position: 0,
-            send_buffer_size: 0,
+            send_buffer: Buffer::new(),
             stream
         }
     }
 
     fn receive_buffer_left_to_fill(&self) -> io::Result<usize> {
         assert!(self.receive_buffer_encrypted);
-        assert!(self.receive_buffer_size >= self.receive_buffer_position);
 
-        if self.receive_buffer_size < 5 {
-            return Ok(5 - self.receive_buffer_size);
+        let receive_buffer_filled = self.receive_buffer.get_filled();
+
+        if receive_buffer_filled.len() < 5 {
+            return Ok(5 - receive_buffer_filled.len());
         }
-        let len = u16::from_be_bytes([self.receive_buffer[3], self.receive_buffer[4]]) as usize;
+
+        let len = u16::from_be_bytes([receive_buffer_filled[3], receive_buffer_filled[4]]) as usize;
+        if len > 0x4000 {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+
+        // IV + AEAD encryption tag
         if len <= 12 + 16 {
             return Err(io::ErrorKind::InvalidData.into());
         }
 
-        assert!(self.receive_buffer_size <= len + 5);
-        Ok((len + 5) - self.receive_buffer_size)
+        Ok((len + 5) - receive_buffer_filled.len())
     }
 
     fn try_flush_send_buffer(&mut self) -> io::Result<()> {
-        if self.send_buffer_size != 0 {
-            let n = self.stream.try_write(&self.send_buffer[self.send_buffer_position..self.send_buffer_size])?;
+        if self.send_buffer.consumed() {
+            return Ok(());
+        }
+        self.send_buffer.io_consume(|b| {
+            let n = self.stream.try_write(b)?;
             if n == 0 {
                 return Err(io::ErrorKind::UnexpectedEof.into());
             }
-            self.send_buffer_position += n;
-            if self.send_buffer_position != self.send_buffer_size {
-                return Err(io::ErrorKind::WouldBlock.into())
-            }
-            self.send_buffer_position = 0;
-            self.send_buffer_size = 0;
+            Ok(n)
+        })?;
+
+        if !self.send_buffer.consumed() {
+            return Err(io::ErrorKind::WouldBlock.into());
         }
         Ok(())
     }
@@ -87,63 +156,71 @@ impl AesTlsTcpStream {
             }
             return Err(e);
         }
-        assert!(self.send_buffer_size == 0 && self.send_buffer_position == 0);
+        assert!(self.send_buffer.consumed());
 
+        // IV + AEAD
         let buf = if buf.len() > MAX_TLS_RECORD_SIZE - 12 - 16 {
             &buf[..MAX_TLS_RECORD_SIZE - 12 - 16]
         } else {
             buf
         };
 
-        self.send_buffer_size += 5 + 12;
-        rsa::rand_core::OsRng.fill_bytes(&mut self.send_buffer[5..5 + 12]);
-        self.send_buffer_size += 16;
-        self.send_buffer_size += buf.len();
-        self.send_buffer[5 + 12 + 16..5 + 12 + 16 + buf.len()].copy_from_slice(buf);
-        self.send_buffer[..3].copy_from_slice(&[0x17, 0x03, 0x03]);
-        let (nonce, rest) = self.send_buffer[5..self.send_buffer_size].split_at_mut(12);
-        let (tag_ref, body) = rest.split_at_mut(16);
-        let tag = self.aes.encrypt_in_place_detached(
-            &Nonce::from_slice(nonce),
-            &[],
-            body
-        ).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-        tag_ref.copy_from_slice(&tag);
-        self.send_buffer[3..5].copy_from_slice(&((self.send_buffer_size - 5) as u16).to_be_bytes());
+        let mut nonce = [0u8; 12];
+        rsa::rand_core::OsRng.fill_bytes(&mut nonce);
 
-        let n = match self.stream.try_write(&self.send_buffer[..self.send_buffer_size]) {
-            Ok(n) => n,
-            Err(e) => {
-                if e.kind() == io::ErrorKind::WouldBlock {
-                    return Ok(buf.len());
+        self.send_buffer.fill(|b| {
+            b[..3].copy_from_slice(&[0x17, 0x03, 0x03]);
+            b[3..5].copy_from_slice(&((12 + 16 + buf.len()) as u16).to_be_bytes());
+            b[5..5 + 12].copy_from_slice(&nonce);
+            5 + 12
+        });
+        self.send_buffer.io_fill(|b| {
+            b[16..16 + buf.len()].copy_from_slice(buf);
+            let tag = self.aes.encrypt_in_place_detached(
+                &Nonce::from_slice(&nonce),
+                &[],
+                &mut b[16..16 + buf.len()]
+            ).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+            b[..16].copy_from_slice(&tag);
+            Ok(16 + buf.len())
+        })?;
+
+        let mut eof = false;
+        self.send_buffer.io_consume(|b| {
+            let n = match self.stream.try_write(b) {
+                Ok(n) => {
+                    if n == 0 {
+                        eof = true;
+                    }
+                    n
+                },
+                Err(e) => {
+                    if e.kind() == io::ErrorKind::WouldBlock {
+                        return Ok(0);
+                    }
+                    return Err(e);
                 }
-                return Err(e);
-            }
-        };
-        if n == 0 {
-            return Ok(0);
-        }
-        self.send_buffer_position += n;
-        if self.send_buffer_position == self.send_buffer_size {
-            self.send_buffer_position = 0;
-            self.send_buffer_size = 0;
+            };
+            Ok(n)
+        })?;
+        if eof {
+            return Ok(0)
         }
         Ok(buf.len())
     }
 
     pub fn try_read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if !self.receive_buffer_encrypted {
-            let receive_buffer =
-                &self.receive_buffer[self.receive_buffer_position..self.receive_buffer_size];
-            assert!(!receive_buffer.is_empty());
+            let mut n = 0;
+            self.receive_buffer.consume(|b| {
+                assert!(!b.is_empty());
 
-            let n = min(buf.len(), receive_buffer.len());
-            buf[..n].copy_from_slice(&receive_buffer[..n]);
-            self.receive_buffer_position += n;
-            if self.receive_buffer_size == self.receive_buffer_position {
+                n = min(buf.len(), b.len());
+                buf[..n].copy_from_slice(&b[..n]);
+                n
+            });
+            if self.receive_buffer.consumed() {
                 self.receive_buffer_encrypted = true;
-                self.receive_buffer_size = 0;
-                self.receive_buffer_position = 0;
             }
             return Ok(n);
         }
@@ -151,27 +228,26 @@ impl AesTlsTcpStream {
         let left_to_fill = self.receive_buffer_left_to_fill()?;
         assert_ne!(left_to_fill, 0);
 
-        let prev_receive_buffer_size = self.receive_buffer_size;
-        self.receive_buffer_size += left_to_fill;
-        let n = match self.stream.try_read(
-            &mut self.receive_buffer[prev_receive_buffer_size..self.receive_buffer_size]
-        ) {
-            Ok(n) => n,
-            Err(e) => {
-                if e.kind() == io::ErrorKind::WouldBlock {
-                    self.receive_buffer_size = prev_receive_buffer_size;
-                    return Err(io::ErrorKind::WouldBlock.into());
+        let mut eof = false;
+        self.receive_buffer.io_fill(|b| {
+            let n = match self.stream.try_read(&mut b[..left_to_fill]) {
+                Ok(n) => {
+                    if n == 0 {
+                        eof = true;
+                    }
+                    n
+                },
+                Err(e) => {
+                    return Err(e);
                 }
-                return Err(e);
-            }
-        };
-        if n == 0 {
+            };
+            Ok(n)
+        })?;
+        if eof {
             return Ok(0);
         }
-        self.receive_buffer_size = prev_receive_buffer_size + n;
-
         if self.receive_buffer_left_to_fill()? == 0 {
-            let (nonce, rest) = self.receive_buffer[5..self.receive_buffer_size].split_at_mut(12);
+            let (nonce, rest) = self.receive_buffer.get_filled_mut()[5..].split_at_mut(12);
             let (tag, body) = rest.split_at_mut(16);
             self.aes.decrypt_in_place_detached(
                 &Nonce::from_slice(nonce),
@@ -180,9 +256,10 @@ impl AesTlsTcpStream {
                 Tag::from_slice(tag)
             ).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
             self.receive_buffer_encrypted = false;
-            self.receive_buffer_position += 5 + 12 + 16;
+            self.receive_buffer.consume(|_| 5 + 12 + 16);
             return self.try_read(buf);
         }
+
         Err(io::ErrorKind::WouldBlock.into())
     }
 
@@ -192,7 +269,6 @@ impl AesTlsTcpStream {
 
     pub async fn readable(&self) -> io::Result<()> {
         if !self.receive_buffer_encrypted {
-            assert!(self.receive_buffer.len() > 5 + 12);
             return Ok(())
         }
         self.stream.readable().await
@@ -210,8 +286,8 @@ impl AesTlsTcpStream {
     }
 
     pub fn into_inner(self) -> TcpStream {
-        assert_eq!(self.send_buffer_size, 0);
-        assert_eq!(self.receive_buffer_size, 0);
+        assert!(self.send_buffer.consumed());
+        assert!(self.receive_buffer.consumed());
 
         self.stream
     }
