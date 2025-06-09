@@ -718,7 +718,7 @@ impl XTlsVisionStream {
             let n = self.inner
                 .get_aes_stream()
                 .unwrap()
-                .try_write(&buf[self.send_buffer_position..self.send_buffer_size])?;
+                .try_write(&self.send_buffer[self.send_buffer_position..self.send_buffer_size])?;
             if n == 0 {
                 return Ok(0);
             }
