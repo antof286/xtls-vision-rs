@@ -453,7 +453,7 @@ impl TlsAnalyzer {
                     return TlsAnalyzerResult::NotTls;
                 }
                 let len = u16::from_be_bytes([self.client_buffer[3], self.client_buffer[4]]) as usize;
-                if len > self.client_buffer.len() {
+                if len > self.client_buffer.len() - 5 {
                     return TlsAnalyzerResult::NeedMoreData;
                 }
                 if self.client_buffer[0] == 0x17 {
@@ -471,7 +471,7 @@ impl TlsAnalyzer {
                     return TlsAnalyzerResult::NeedMoreData;
                 }
                 let len = u16::from_be_bytes([self.client_buffer[3], self.client_buffer[4]]) as usize;
-                if len > self.client_buffer.len() {
+                if len > self.client_buffer.len() - 5 {
                     return TlsAnalyzerResult::NeedMoreData;
                 }
                 self.client_buffer.drain(..len + 5);
@@ -497,7 +497,7 @@ impl TlsAnalyzer {
                     return TlsAnalyzerResult::NotTls;
                 }
                 let len = u16::from_be_bytes([self.server_buffer[3], self.server_buffer[4]]) as usize;
-                if len > self.server_buffer.len() {
+                if len > self.server_buffer.len() - 5 {
                     return TlsAnalyzerResult::NeedMoreData;
                 }
                 if self.server_buffer[0] == 0x17 {
@@ -515,7 +515,7 @@ impl TlsAnalyzer {
                     return TlsAnalyzerResult::NeedMoreData;
                 }
                 let len = u16::from_be_bytes([self.server_buffer[3], self.server_buffer[4]]) as usize;
-                if len > self.server_buffer.len() {
+                if len > self.server_buffer.len() - 5 {
                     return TlsAnalyzerResult::NeedMoreData;
                 }
                 self.server_buffer.drain(..len + 5);
